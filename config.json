@@ -1,0 +1,17 @@
+{
+    "batch_size" : 16,
+    "momentum" : 0.9,
+    "lr" : 0.01,
+    "num_epochs" : 100,
+
+    "n_encoders" : 3,
+    "encoder_channels" : 16,
+    "encoder_kernel_size" : 5,
+    "encoder_padding" : 2,
+    "decoder_kernel_size" : [3, 5, 9, 17, 33, 65],
+    "decoder_padding" : 0,
+
+    "transformer_in_layers" : 256,
+    "transformer_out_layers" : 256
+
+}

@@ -1,4 +1,4 @@
-brats2021
+brats2021*
 .DS_Store
 .ipynb_checkpoints/explore_data-checkpoint.ipynb
 *.tar
