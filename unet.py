@@ -9,6 +9,7 @@ import random
 from tqdm import tqdm
 import json
 
+
 class BraTSDataset(Dataset):
     def __init__(self, config):
         self.config = config
@@ -16,33 +17,38 @@ class BraTSDataset(Dataset):
         self.dataset_list = os.listdir('./brats2021/')
         self.levels = ['t1', 'flair', 't2', 't1ce']
 
-
     def __len__(self):
         return len(self.dataset_list)
 
     def __getitem__(self, folder_index):
-        level = self.levels[1] #t1ce
-        image = nib.load(self.dataset_folder + self.dataset_list[folder_index] + '/' + self.dataset_list[folder_index] + '_' + level + '.nii.gz').get_fdata()
+        all_img = []
+        for level in self.levels:
+            img = nib.load(self.dataset_folder + self.dataset_list[folder_index] + '/' + self.dataset_list[folder_index] + '_' + level + '.nii.gz').get_fdata()
+
+            # normalize images to be between 0 and 255
+            img = (img * 255) / np.max(img)
+            all_img.append(img)
+
         seg = nib.load(self.dataset_folder + self.dataset_list[folder_index] + '/' + self.dataset_list[folder_index] + '_seg' + '.nii.gz').get_fdata()
 
-        image = (image * 255) / np.max(image)
+        img = np.array(all_img)
 
-        width, height, n_images = image.shape
+        n_levels, width, height, n_images = img.shape
 
         s = self.config['brain_3d_size']
-        n = random.randint(s, 200-s) # for 128 should be (0, width-s)
-        m = random.randint(50, 130-s) # for 128 should be (9, n_images-s)
-        image = image[n:n+s, n:n+s, m:m+s]
+        n = random.randint(50, 170-s) # for 128 should be (0, width-s)
+        m = random.randint(50, 80) # for 128 should be (9, n_images-s)
+        img = img[:,n:n+s, n:n+s, m:m+s]
         seg = seg[n:n+s, n:n+s, m:m+s]
 
-        image = np.moveaxis(image, 2, 0)
+        img = np.moveaxis(img, 3, 1)
         seg =  np.moveaxis(seg, 2, 0)
 
-        image = torch.from_numpy(image)
+        img = torch.from_numpy(img)
         seg = torch.from_numpy(seg)
 
-        # 1, n_images, height, width
-        return image[None, :, :, :], seg[None, :, :, :]
+        # 4, n_images, height, width
+        return img[:, :, :, :], seg[None, :, :, :]
 
 class EncoderBlock(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, padding):
@@ -71,65 +77,81 @@ class DecoderBlock(nn.Module):
         return x
 
 class PositionalEmbedding(nn.Module):
-    def __init__(self):
+    def __init__(self, in_channels, out_channels):
         super().__init__()
+        self.conv = nn.Conv3d(in_channels, out_channels, kernel_size=3, padding=1)
+        self.position_embedding = nn.Parameter(torch.zeros(4, 64, 512))
 
     def forward(self, x):
-        batch_size, n_classes, depth, height, width = x.shape
+        x = self.conv(x)
 
-        x = torch.reshape(x, (batch_size, n_classes, depth*height*width))
+        batch_size, n_feats, depth, height, width = x.shape
+
+        x = torch.reshape(x, (batch_size, n_feats, depth*height*width))
         x = x.transpose(1, 2)
-        return x
 
-class AttentionBlock(nn.Module):
-    def __init__(self, attention_layers):
-        super().__init__()
-
-        self.attention_layers = attention_layers
-        in_layers = attention_layers
-        out_layers = attention_layers
-
-        self.query = nn.Linear(in_layers, out_layers)
-        self.key = nn.Linear(in_layers, out_layers)
-        self.value = nn.Linear(in_layers, out_layers)
-        self.softmax = nn.Softmax(dim=2)
-
-    def forward(self, x):
-        n_batches, w, h = x.shape
-        query = self.query(torch.reshape(x, (n_batches, w*h)))
-        key = self.key(torch.reshape(x, (n_batches, w*h)))
-        value = self.value(torch.reshape(x, (n_batches, w*h)))
-
-        query, key, value = torch.reshape(query, (n_batches, w, h)), torch.reshape(key, (n_batches, w, h)), torch.reshape(value, (n_batches, w, h))
-
-        attention = self.softmax((query @ key.transpose(1, 2)) / np.sqrt(self.attention_layers)) @ value
+        x = x + self.position_embedding
 
         return x
+
 
 class TransformerBlock(nn.Module):
     def __init__(self, config, attention_layers):
         super().__init__()
-        self.position_embedding = PositionalEmbedding()
-        self.attention = AttentionBlock(attention_layers)
+        self.config = config
+        self.d = attention_layers*4
+
+        self.position_embedding = PositionalEmbedding(attention_layers, attention_layers*4)
+        self.layer_norm = nn.LayerNorm(self.d)
+        self.query = nn.Linear(self.d, self.d)
+        self.key = nn.Linear(self.d, self.d)
+        self.value = nn.Linear(self.d, self.d)
+        self.softmax = nn.Softmax(dim=2)
+        self.ffn = nn.Linear(self.d, self.d)
+        self.relu = nn.ReLU()
+        self.conv = nn.Conv3d(self.d, attention_layers, kernel_size=3, padding=1)
+
+    def _split_heads(self, x):
+        shape = x.shape
+        return x.view(shape[0], shape[1], self.config['transformer_n_heads'], shape[2]//self.config['transformer_n_heads']).permute(0, 2, 1, 3)
+
+    def _merge_heads(self, x):
+        shape = x.shape
+        return x.permute(0, 2, 1, 3).contiguous().view(shape[0], shape[2], shape[3]*self.config['transformer_n_heads'])
 
     def forward(self,x):
+        # for final reshape
+        batch_size, n_feats, w, h, d = x.shape
+
         x = self.position_embedding(x)
-        x = self.attention(x)
+        x = self.layer_norm(x)
+
+        query, key, value = self.query(x), self.key(x), self.value(x)
+        
+        query, key, value = self._split_heads(query), self._split_heads(key), self._split_heads(value)
+
+        attention = self.softmax((query @ key.transpose(2, 3)) / np.sqrt(query.shape[3])) @ value
+
+        attention = self._merge_heads(attention)
+
+        xt = attention + x
+
+        x = self.layer_norm(xt)
+
+        x = self.relu(self.ffn(x)) + xt
 
         x = x.transpose(1, 2)
+        x = torch.reshape(x, (batch_size, self.d, w, h, d))
 
-        batch_size, n_patches, size_patches = x.shape
-        new_size_patches = int(np.cbrt(size_patches))
-        x = torch.reshape(x, (batch_size, n_patches, new_size_patches, new_size_patches, new_size_patches))
-
+        x = self.conv(x)
         return x
 
 class UneT(nn.Module):
     def __init__(self, config):
         super().__init__()
 
-        # encoder_channels: 1, 16, 32, 64, etc
-        encoder_channels = [1]
+        # encoder_channels: 4, 16, 32, 64, etc
+        encoder_channels = [4]
         for i in range(config['n_encoders']):
             encoder_channels.append(config['encoder_channels']*(2**i))
 
@@ -141,7 +163,8 @@ class UneT(nn.Module):
 
         self.upsampler_blocks = nn.ModuleList([DecoderBlock(encoder_channels[i+2], encoder_channels[i+1], decoder_kernels[idx], config['decoder_padding']) for idx, i in enumerate(reversed(range(config['n_encoders']-1)))])
 
-        self.transformer = TransformerBlock(config, encoder_channels[-1]*encoder_channels[-2])
+        mlp_layers = encoder_channels[-1]
+        self.transformer = TransformerBlock(config, mlp_layers)
 
         encoder_channels[0] = config['num_classes']
         self.decoder_blocks = nn.ModuleList([EncoderBlock(encoder_channels[i+1], encoder_channels[i], config['encoder_kernel_size'], config['encoder_padding']) for i in reversed(range(config['n_encoders']))])

@@ -13,6 +13,7 @@
     "encoder_padding" : 2,
     "decoder_kernel_size" : [2, 3, 5, 9, 17],
     "decoder_padding" : 0,
+    "transformer_n_heads" : 2,
 
-    "loss_epsilon" : 0.000001
+    "loss_epsilon" : 0.00001
 }
