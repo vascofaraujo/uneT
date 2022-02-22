@@ -2,7 +2,7 @@
     "num_classes" : 4,
     "batch_size" : 4,
     "momentum" : 0.9,
-    "lr" : 0.01,
+    "lr" : 0.001,
     "num_epochs" : 100,
 
     "brain_3d_size" : 32,
@@ -13,7 +13,7 @@
     "encoder_padding" : 2,
     "decoder_kernel_size" : [2, 3, 5, 9, 17],
     "decoder_padding" : 0,
-    "transformer_n_heads" : 2,
+    "transformer_n_heads" : 8,
 
     "loss_epsilon" : 0.00001
 }

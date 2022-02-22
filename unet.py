@@ -80,20 +80,17 @@ class PositionalEmbedding(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
         self.conv = nn.Conv3d(in_channels, out_channels, kernel_size=3, padding=1)
-        self.position_embedding = nn.Parameter(torch.zeros(4, 64, 512))
 
     def forward(self, x):
         x = self.conv(x)
 
         batch_size, n_feats, depth, height, width = x.shape
-
         x = torch.reshape(x, (batch_size, n_feats, depth*height*width))
-        x = x.transpose(1, 2)
 
-        x = x + self.position_embedding
+        position_embedding = nn.Parameter(torch.zeros(batch_size, n_feats, depth*height*width))
+        x = x + position_embedding
 
-        return x
-
+        return x.transpose(1, 2)
 
 class TransformerBlock(nn.Module):
     def __init__(self, config, attention_layers):
@@ -127,7 +124,7 @@ class TransformerBlock(nn.Module):
         x = self.layer_norm(x)
 
         query, key, value = self.query(x), self.key(x), self.value(x)
-        
+
         query, key, value = self._split_heads(query), self._split_heads(key), self._split_heads(value)
 
         attention = self.softmax((query @ key.transpose(2, 3)) / np.sqrt(query.shape[3])) @ value
